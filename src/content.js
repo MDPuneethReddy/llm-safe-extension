@@ -235,19 +235,30 @@ CRITERIA:
    - API keys or authentication tokens
    - Production credentials or URLs
 
-IMPORTANT INSTRUCTIONS:
+CRITICAL INSTRUCTIONS FOR EXACT MATCHING:
+- Return each sentence EXACTLY as it appears in the user's input
+- Preserve ALL punctuation marks exactly (periods, commas, exclamation marks, question marks, etc.)
+- Preserve ALL capitalization exactly as written
+- Preserve ALL spacing exactly as written
+- Do NOT modify, rephrase, or rewrite any part of the sentences
+- Copy the sentences character-for-character from the original text
+
+RESPONSE FORMAT:
 - Return ONLY a raw JSON array, like ["sentence one.", "sentence two."]. 
 - DO NOT include any explanations, notes, markdown formatting (e.g. json), or extra text.
 - If no sentence qualifies, return an empty array: []
 
 EXAMPLES:
-Input: "I am a good person. I didn't pay taxes. My SSN is 123-45-6789."
-Output: ["I didn't pay taxes.", "My SSN is 123-45-6789."]
+Input: "I am a good person. I didn't pay taxes! My SSN is 123-45-6789..."
+Output: ["I didn't pay taxes", "My SSN is 123-45-6789"]
+
+Input: "hello world. My phone is 555-1234. I love dogs?"
+Output: ["My phone is 555-1234"]
 
 Input: "I love dogs. The weather is nice."
 Output: []
 
-Ready to return ONLY a JSON array.
+Remember: Copy sentences EXACTLY as they appear in the input text with identical punctuation and spacing.
 `;
 
 (async () => {
