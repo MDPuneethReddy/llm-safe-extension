@@ -19,28 +19,27 @@ function waitForWebLLM() {
     check();
   });
 }
-function escapeHtml(text) {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-function highlightSensitiveText(inputDiv, sensitiveSentences) {
-  const allText = inputDiv.innerText;
-  const sentences = allText.split(/(?<=\.)\s+/);
 
-  const highlightedHTML = sentences
-    .map(sentence => {
-      if (sensitiveSentences.some(sen => sen.trim() === sentence.trim())) {
-        return `<span style="background-color: rgba(255,0,0,0.3);">${escapeHtml(sentence)}</span>`;
-      } else {
-        return escapeHtml(sentence);
-      }
-    })
-    .join(" ");
+const systemPrompt = `You are a content filter. When given a message, respond ONLY with a JSON array of sentences that meet one or both of these criteria:
 
-  inputDiv.innerHTML = highlightedHTML;
-}
+1. The sentence is a clear confession of a serious illegal act that could lead to jail or criminal prosecution (e.g., theft, assault, tax evasion, murder, fraud, etc). DO NOT include ambiguous or trivial statements like "I am not a good boy".
+2. The sentence contains personal data or sensitive information, such as:
+   - Phone numbers
+   - Social Security Numbers (SSNs)
+   - Mobile numbers
+   - API keys or tokens
+   - Production credentials or URLs
+   - Email addresses
+
+Return an empty array if there are no such sentences.
+
+Example input: "I am not a good boy. My API key is abc123. I didn't do taxes. I killed someone. My phone number is 555-123-4567."
+Expected output: ["My API key is abc123.", "I didn't do taxes.", "I killed someone.", "My phone number is 555-123-4567."]
+
+Example input: "I am a good boy. I love my dog."
+Expected output: []
+`;
+
 (async () => {
   let webllm;
   try {
@@ -59,14 +58,6 @@ function highlightSensitiveText(inputDiv, sensitiveSentences) {
     return;
   }
 
- const systemPrompt = `You are a content filter. When given a message, respond with only "SAFE" or "SENSITIVE".
-A message is SENSITIVE if it contains:
-- Personal data (SSNs, emails, phone numbers)
-- API keys or tokens
-- Production credentials or URLs
-- Confessions of illegal or unethical behavior
-Otherwise, respond with SAFE.`;
-
   // Monitor Perplexity.ai contenteditable div (#ask-input)
   const observer = new MutationObserver(() => {
     const inputDiv = document.querySelector("#ask-input");
@@ -78,27 +69,29 @@ Otherwise, respond with SAFE.`;
   });
 
   observer.observe(document.body, { childList: true, subtree: true });
-
+  const inputDiv = document.querySelector("#ask-input");
+if (inputDiv) {
+  console.log("Detected #ask-input div (immediate), attaching listener...");
+  attachListener(inputDiv);
+  observer.disconnect();
+}
   function attachListener(inputDiv) {
-  let typingTimer; // timer identifier
-  const doneTypingInterval = 700; // wait 700ms after user stops typing
+  let typingTimer;
+  const doneTypingInterval = 300;
 
-  inputDiv.addEventListener("input", () => {
+  const processInput = () => {
     clearTimeout(typingTimer);
-
     typingTimer = setTimeout(async () => {
-      const text = inputDiv.innerText.trim();
+      const text = inputDiv.textContent.trim();
       console.log("User stopped typing, input:", text);
 
       if (!text) {
         inputDiv.style.border = "";
         inputDiv.title = "";
-        inputDiv.innerHTML = escapeHtml(text);
         return;
       }
 
       try {
-        // fresh chat for each input detection
         const response = await engine.chat.completions.create({
           messages: [
             { role: "system", content: systemPrompt },
@@ -108,26 +101,51 @@ Otherwise, respond with SAFE.`;
 
         console.log("Full response:", response);
 
-        const verdict = response.choices[0].message.content.trim();
         let sensitiveSentences = [];
+        const llmContent = response.choices[0].message.content.trim();
+        console.log("LLM content:", llmContent);
 
-        if (verdict.toUpperCase().includes("SENSITIVE")) {
-          // Here you might want to improve how you extract sentences
-          // For now, highlight entire input as sensitive or specific sentences if available
-          sensitiveSentences = [text]; // simple: highlight whole text
-          highlightSensitiveText(inputDiv, sensitiveSentences);
-          inputDiv.style.border = "2px solid red";
-          inputDiv.title = "⚠️ Warning: Sensitive info detected";
+        const match = llmContent.match(/```json\s*(\[[^\]]*\])\s*```/i) || llmContent.match(/(\[[^\]]*\])/);
+        if (match && match[1]) {
+          try {
+            sensitiveSentences = JSON.parse(match[1]);
+            if (!Array.isArray(sensitiveSentences)) throw new Error("Not an array");
+          } catch (e) {
+            console.warn("⚠️ Could not parse JSON array from LLM content.", e);
+            sensitiveSentences = [];
+          }
         } else {
+          try {
+            sensitiveSentences = JSON.parse(llmContent);
+            if (!Array.isArray(sensitiveSentences)) throw new Error("Not an array");
+          } catch (e) {
+            console.warn("⚠️ No JSON array found in LLM content.");
+            sensitiveSentences = [];
+          }
+        }
+
+        if (sensitiveSentences.length > 0) {
+          console.log("Detected sensitive/confession sentences:", sensitiveSentences);
+          inputDiv.style.border = "2px solid red";
+          inputDiv.title = "⚠️ Sensitive or criminal confession detected";
+        } else {
+          console.log("No sensitive/confession sentences detected.");
           inputDiv.style.border = "";
           inputDiv.title = "";
-          // remove highlights, keep plain text
-          inputDiv.innerHTML = escapeHtml(text);
         }
       } catch (err) {
         console.error("❌ Error during chat processing:", err);
       }
     }, doneTypingInterval);
+  };
+
+  inputDiv.addEventListener("input", processInput);
+  inputDiv.addEventListener("blur", processInput);
+  inputDiv.addEventListener("paste", () => {
+    setTimeout(processInput, 0); // Wait for paste to complete
   });
-  }
+inputDiv.addEventListener("keyup", processInput); 
+  // Process existing text immediately after attaching
+  processInput();
+}
 })();
