@@ -12,6 +12,8 @@ class SensitiveTextDetector {
     this.isMainTab = false;
     this.messageId = 0;
     this.pendingMessages = new Map();
+    this.statusIcon = null;
+    this.isProcessing = false;
     
     // Use BroadcastChannel for cross-tab communication
     this.channel = new BroadcastChannel('webllm_shared_engine');
@@ -40,7 +42,197 @@ Examples:
 Sentence: `;
   }
 
+  // Create and manage the status icon
+  createStatusIcon() {
+    if (this.statusIcon) return;
+
+    // Create icon container
+    this.statusIcon = document.createElement('div');
+    this.statusIcon.id = 'sensitive-text-detector-icon';
+    this.statusIcon.style.cssText = `
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      background-color: #dc2626;
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 24px;
+      font-weight: bold;
+      cursor: pointer;
+      z-index: 10000;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      transition: all 0.3s ease;
+      user-select: none;
+    `;
+
+    // Create the "G" text
+    const gText = document.createElement('span');
+    gText.textContent = 's';
+    gText.style.cssText = `
+      position: relative;
+      z-index: 2;
+    `;
+    this.statusIcon.appendChild(gText);
+
+    // Create spinner overlay (initially hidden)
+    const spinner = document.createElement('div');
+    spinner.className = 'spinner';
+    spinner.style.cssText = `
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 30px;
+      height: 30px;
+      margin: -15px 0 0 -15px;
+      border: 3px solid rgba(255, 255, 255, 0.3);
+      border-top: 3px solid white;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      z-index: 3;
+    `;
+    this.statusIcon.appendChild(spinner);
+
+    // Add CSS keyframes for spinner animation
+    if (!document.querySelector('#detector-spinner-styles')) {
+      const style = document.createElement('style');
+      style.id = 'detector-spinner-styles';
+      style.textContent = `
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        
+        #sensitive-text-detector-icon:hover {
+          transform: scale(1.05);
+          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    // Add click handler for status info
+    this.statusIcon.addEventListener('click', () => {
+      this.showStatusTooltip();
+    });
+
+    // Add to page
+    document.body.appendChild(this.statusIcon);
+
+    // Set initial status
+    this.updateIconStatus('not-ready');
+  }
+
+  updateIconStatus(status) {
+    if (!this.statusIcon) return;
+
+    const spinner = this.statusIcon.querySelector('.spinner');
+    const gText = this.statusIcon.querySelector('span');
+
+    switch (status) {
+      case 'not-ready':
+        this.statusIcon.style.backgroundColor = '#dc2626'; // Red
+        this.statusIcon.title = '🔴 AI Engine Not Ready - Loading...';
+        spinner.style.opacity = '0';
+        gText.style.opacity = '1';
+        break;
+        
+      case 'loading':
+        this.statusIcon.style.backgroundColor = '#f59e0b'; // Orange
+        this.statusIcon.title = '🟡 AI Engine Loading...';
+        spinner.style.opacity = '0';
+        gText.style.opacity = '1';
+        break;
+        
+      case 'ready':
+        this.statusIcon.style.backgroundColor = '#059669'; // Green
+        this.statusIcon.title = '🟢 AI Engine Ready - Monitoring Text';
+        spinner.style.opacity = '0';
+        gText.style.opacity = '1';
+        break;
+        
+      case 'processing':
+        // Keep current background color but show spinner
+        this.statusIcon.title = '⚡ Processing Text...';
+        spinner.style.opacity = '1';
+        gText.style.opacity = '0.3';
+        break;
+        
+      case 'error':
+        this.statusIcon.style.backgroundColor = '#7c2d12'; // Dark red
+        this.statusIcon.title = '❌ AI Engine Error';
+        spinner.style.opacity = '0';
+        gText.style.opacity = '1';
+        break;
+    }
+  }
+
+  setProcessingState(isProcessing) {
+    this.isProcessing = isProcessing;
+    if (isProcessing) {
+      this.updateIconStatus('processing');
+    } else {
+      // Return to previous state based on engine status
+      if (this.isInitialized) {
+        this.updateIconStatus('ready');
+      } else {
+        this.updateIconStatus('not-ready');
+      }
+    }
+  }
+
+  showStatusTooltip() {
+    // Create temporary tooltip
+    const tooltip = document.createElement('div');
+    tooltip.style.cssText = `
+      position: fixed;
+      bottom: 80px;
+      right: 20px;
+      background: rgba(0, 0, 0, 0.9);
+      color: white;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      z-index: 10001;
+      max-width: 300px;
+      line-height: 1.4;
+    `;
+
+    let statusText = '';
+    if (!this.isInitialized && !this.isMainTab) {
+      statusText = '🔴 Engine Not Ready\nWaiting for AI model to load...';
+    } else if (!this.isInitialized && this.isMainTab) {
+      statusText = '🟡 Loading AI Model\nThis may take a few moments...';
+    } else if (this.isProcessing) {
+      statusText = '⚡ Processing Text\nAnalyzing for sensitive content...';
+    } else {
+      statusText = '🟢 Ready & Monitoring\nAI engine is active and watching for sensitive text';
+    }
+
+    tooltip.textContent = statusText;
+    document.body.appendChild(tooltip);
+
+    // Auto-remove after 3 seconds
+    setTimeout(() => {
+      if (tooltip.parentNode) {
+        tooltip.remove();
+      }
+    }, 3000);
+  }
+
   async initialize() {
+    // Create icon immediately
+    this.createStatusIcon();
+    this.updateIconStatus('not-ready');
+    
     this.requestEngineStatus();
     await new Promise(resolve => setTimeout(resolve, 1000));
     
@@ -59,13 +251,19 @@ Sentence: `;
   async becomeMainTab() {
     console.log("🚀 Becoming main tab, loading WebLLM engine...");
     this.isMainTab = true;
+    this.updateIconStatus('loading');
     
     try {
       this.engine = await CreateMLCEngine(
         "Phi-3.5-mini-instruct-q4f32_1-MLC-1k",
         {
           initProgressCallback: (progress) => {
-            console.log(`Loading model: ${Math.round(progress.progress * 100)}%`);
+            const percentage = Math.round(progress.progress * 100);
+            console.log(`Loading model: ${percentage}%`);
+            this.updateIconStatus('loading');
+            if (this.statusIcon) {
+              this.statusIcon.title = `🟡 Loading AI Model: ${percentage}%`;
+            }
             this.channel.postMessage({
               type: 'loading_progress',
               progress: progress.progress
@@ -75,6 +273,7 @@ Sentence: `;
       );
       
       this.isInitialized = true;
+      this.updateIconStatus('ready');
       console.log("✅ WebLLM engine loaded successfully");
       
       this.channel.postMessage({
@@ -86,6 +285,7 @@ Sentence: `;
       
     } catch (error) {
       console.error("❌ Failed to load engine:", error);
+      this.updateIconStatus('error');
       this.channel.postMessage({
         type: 'engine_error',
         error: error.message
@@ -115,6 +315,7 @@ Sentence: `;
         if (message.mainTab !== this.getTabId()) {
           console.log("✅ Connected to shared engine from another tab");
           this.isInitialized = true;
+          this.updateIconStatus('ready');
           this.processWaitingInputs();
         }
         break;
@@ -131,10 +332,15 @@ Sentence: `;
         
       case 'engine_error':
         console.error("Engine error from main tab:", message.error);
+        this.updateIconStatus('error');
         break;
         
       case 'loading_progress':
-        console.log(`Model loading: ${Math.round(message.progress * 100)}%`);
+        const percentage = Math.round(message.progress * 100);
+        console.log(`Model loading: ${percentage}%`);
+        if (this.statusIcon && !this.isMainTab) {
+          this.statusIcon.title = `🟡 Loading AI Model: ${percentage}%`;
+        }
         break;
     }
   }
@@ -531,6 +737,9 @@ Sentence: `;
     try {
       console.log("🔍 Processing text with real-time sentence analysis");
       
+      // Set processing state (show spinner)
+      this.setProcessingState(true);
+      
       // Pass inputDiv to enable real-time highlighting
       const sensitiveRanges = await this.analyzeBulkText(text, inputDiv);
       
@@ -551,6 +760,8 @@ Sentence: `;
       console.error("❌ Processing error:", error);
     } finally {
       this.processingQueue.delete(processingKey);
+      // Clear processing state (hide spinner)
+      this.setProcessingState(false);
     }
   }
 
