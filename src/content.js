@@ -1,6 +1,6 @@
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
 
-/* ---------------- Bug-Fixed Shared Engine via BroadcastChannel ---------------- */
+/* ---------------- Sentence-by-Sentence Parallel Detector ---------------- */
 class SensitiveTextDetector {
   constructor() {
     this.isInitialized = false;
@@ -19,23 +19,32 @@ class SensitiveTextDetector {
       this.handleChannelMessage(event.data);
     });
     
-    this.classificationPrompt = `Find sensitive information. Reply ONLY with JSON array: [{"start":0,"end":10,"type":"auth"}]
+    // Simple binary classification prompt
+    this.classificationPrompt = `Analyze this sentence for sensitive information. Respond with ONLY "true" or "false".
 
-Types: "personal","financial","auth","confession"
-Empty: []
+Sensitive information includes:
+- Personal names, addresses, phone numbers, email addresses
+- Passwords, API keys, tokens, credentials
+- Credit card numbers, bank account numbers, SSN
+- Personal confessions, secrets, private thoughts
+- Financial details, salary information
 
-Text: `;
+Examples:
+"My name is John Smith" → true
+"My password is abc123" → true  
+"I confess I cheated on the test" → true
+"The weather is nice today" → false
+"Let's meet at the coffee shop" → false
+"I love pizza" → false
+
+Sentence: `;
   }
 
   async initialize() {
-    // Check if another tab already has the engine
     this.requestEngineStatus();
-    
-    // Wait a bit to see if we get a response
     await new Promise(resolve => setTimeout(resolve, 1000));
     
     if (!this.isInitialized) {
-      // No other tab has the engine, so we become the main tab
       await this.becomeMainTab();
     }
   }
@@ -57,8 +66,6 @@ Text: `;
         {
           initProgressCallback: (progress) => {
             console.log(`Loading model: ${Math.round(progress.progress * 100)}%`);
-            
-            // Broadcast progress to other tabs
             this.channel.postMessage({
               type: 'loading_progress',
               progress: progress.progress
@@ -70,7 +77,6 @@ Text: `;
       this.isInitialized = true;
       console.log("✅ WebLLM engine loaded successfully");
       
-      // Notify other tabs that engine is ready
       this.channel.postMessage({
         type: 'engine_ready',
         mainTab: this.getTabId()
@@ -169,10 +175,8 @@ Text: `;
 
   async sendChatRequest(data) {
     if (this.isMainTab && this.engine) {
-      // Direct call if we have the engine
       return await this.engine.chat.completions.create(data);
     } else {
-      // Send request to main tab via BroadcastChannel
       return new Promise((resolve, reject) => {
         const requestId = ++this.messageId;
         
@@ -185,7 +189,6 @@ Text: `;
           data
         });
         
-        // Timeout after 30 seconds
         setTimeout(() => {
           if (this.pendingMessages.has(requestId)) {
             this.pendingMessages.delete(requestId);
@@ -196,39 +199,159 @@ Text: `;
     }
   }
 
-  async analyzeBulkText(text) {
+  // Split text into sentences with positions
+  splitIntoSentences(text) {
+    const sentences = [];
+    
+    // More comprehensive sentence splitting
+    const sentenceRegex = /[.!?]+(?:\s+|$)/g;
+    let lastEnd = 0;
+    let match;
+    
+    while ((match = sentenceRegex.exec(text)) !== null) {
+      const sentenceEnd = match.index + match[0].length;
+      const sentence = text.slice(lastEnd, sentenceEnd).trim();
+      
+      if (sentence.length > 0) {
+        sentences.push({
+          text: sentence,
+          start: lastEnd,
+          end: sentenceEnd
+        });
+      }
+      
+      lastEnd = sentenceEnd;
+    }
+    
+    // Handle remaining text if no final punctuation
+    if (lastEnd < text.length) {
+      const remaining = text.slice(lastEnd).trim();
+      if (remaining.length > 0) {
+        sentences.push({
+          text: remaining,
+          start: lastEnd,
+          end: text.length
+        });
+      }
+    }
+    
+    return sentences;
+  }
+
+  // Classify a single sentence
+  async classifySentence(sentence) {
     try {
       const response = await this.sendChatRequest({
         messages: [
-          { role: "user", content: this.classificationPrompt + text }
+          { role: "user", content: this.classificationPrompt + sentence }
         ],
         temperature: 0.0,
-        max_tokens: 200
+        max_tokens: 10, // Very short response needed
+        stop: ["\n", " "] // Stop at first word
       });
       
-      const result = response.choices[0].message.content.trim();
-      console.log("Engine Response:", result);
+      const result = response.choices[0].message.content.trim().toLowerCase();
+      console.log(`Sentence: "${sentence}" → ${result}`);
       
-      // Parse response
-      try {
-        let cleanResult = result.trim();
-        if (cleanResult.startsWith('```json')) {
-          cleanResult = cleanResult.replace(/```json\s*/, '').replace(/```.*$/, '').trim();
-        } else if (cleanResult.startsWith('```')) {
-          cleanResult = cleanResult.replace(/```\s*/, '').replace(/```.*$/, '').trim();
+      // Parse true/false response
+      return result.includes('true');
+      
+    } catch (error) {
+      console.error("Classification error:", error);
+      return false; // Default to not sensitive on error
+    }
+  }
+
+  // Process sentences with real-time highlighting
+  async processSentencesWithRealTimeHighlighting(sentences, inputDiv, batchSize = 3) {
+    const allResults = [];
+    let currentSensitiveRanges = [];
+    
+    for (let i = 0; i < sentences.length; i += batchSize) {
+      const batch = sentences.slice(i, i + batchSize);
+      
+      console.log(`Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(sentences.length/batchSize)}: ${batch.length} sentences`);
+      
+      // Process batch in parallel with individual callbacks
+      const batchPromises = batch.map(async (sentenceObj) => {
+        try {
+          const isSensitive = await this.classifySentence(sentenceObj.text);
+          const result = {
+            ...sentenceObj,
+            isSensitive
+          };
+          
+          // Immediately highlight if sensitive
+          if (isSensitive) {
+            console.log(`🚨 Real-time highlight: "${sentenceObj.text}"`);
+            currentSensitiveRanges.push({
+              start: sentenceObj.start,
+              end: sentenceObj.end,
+              type: 'sensitive',
+              text: sentenceObj.text
+            });
+            
+            // Update highlight overlay immediately
+            this.createHighlightOverlay(inputDiv, [...currentSensitiveRanges]);
+            
+            // Update border and tooltip
+            inputDiv.style.border = "2px solid red";
+            inputDiv.title = `⚠️ ${currentSensitiveRanges.length} sensitive sentence(s) detected`;
+          }
+          
+          return result;
+        } catch (error) {
+          console.error("Error processing sentence:", sentenceObj.text, error);
+          return {
+            ...sentenceObj,
+            isSensitive: false
+          };
         }
-        
-        const jsonMatch = cleanResult.match(/\[[\s\S]*?\]/);
-        if (jsonMatch) {
-          cleanResult = jsonMatch[0];
-        }
-        
-        const ranges = JSON.parse(cleanResult);
-        return Array.isArray(ranges) ? ranges : [];
-      } catch (parseError) {
-        console.warn("Failed to parse response:", result);
-        return this.extractRangesFromText(result);
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      allResults.push(...batchResults);
+      
+      // Small delay between batches to prevent overwhelming
+      if (i + batchSize < sentences.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
+    }
+    
+    return allResults;
+  }
+
+  async analyzeBulkText(text, inputDiv) {
+    try {
+      console.log(`🔍 Analyzing text: "${text.substring(0, 50)}..." (${text.length} chars)`);
+      
+      // Split into sentences
+      const sentences = this.splitIntoSentences(text);
+      console.log(`Split into ${sentences.length} sentences:`, sentences.map(s => s.text));
+      
+      if (sentences.length === 0) {
+        return [];
+      }
+      
+      // Clear existing highlights before starting
+      this.removeOverlaysForInput(inputDiv);
+      inputDiv.style.border = "";
+      inputDiv.title = "";
+      
+      // Process with real-time highlighting
+      const results = await this.processSentencesWithRealTimeHighlighting(sentences, inputDiv, 3);
+      
+      // Filter to only sensitive sentences for final result
+      const sensitiveSentences = results.filter(s => s.isSensitive);
+      
+      console.log(`Final result: ${sensitiveSentences.length} sensitive sentences`);
+      
+      return sensitiveSentences.map(s => ({
+        start: s.start,
+        end: s.end,
+        type: 'sensitive',
+        text: s.text
+      }));
       
     } catch (error) {
       console.error("Analysis error:", error);
@@ -236,73 +359,25 @@ Text: `;
     }
   }
 
-  extractRangesFromText(response) {
-    const ranges = [];
-    const rangePattern = /"start"\s*:\s*(\d+).*?"end"\s*:\s*(\d+).*?"type"\s*:\s*"(\w+)"/g;
-    let match;
-    
-    while ((match = rangePattern.exec(response)) !== null) {
-      ranges.push({
-        start: parseInt(match[1]),
-        end: parseInt(match[2]),
-        type: match[3]
-      });
-    }
-    
-    return ranges;
-  }
-
   processWaitingInputs() {
     const inputDiv = document.querySelector("#ask-input");
     if (inputDiv && this.attachedInputs.has(inputDiv)) {
-      // Process immediately if there's existing text
       this.processInput(inputDiv);
     }
   }
 
-  chunkText(text, maxChunkSize = 500) {
-    if (text.length <= maxChunkSize) {
-      return [{ text, offset: 0 }];
-    }
-    
-    const chunks = [];
-    let offset = 0;
-    
-    while (offset < text.length) {
-      let chunkEnd = offset + maxChunkSize;
-      
-      if (chunkEnd < text.length) {
-        const lastPeriod = text.lastIndexOf('.', chunkEnd);
-        const lastExclaim = text.lastIndexOf('!', chunkEnd);
-        const lastQuestion = text.lastIndexOf('?', chunkEnd);
-        const lastBreak = Math.max(lastPeriod, lastExclaim, lastQuestion);
-        
-        if (lastBreak > offset + 100) {
-          chunkEnd = lastBreak + 1;
-        }
-      }
-      
-      chunks.push({
-        text: text.slice(offset, chunkEnd),
-        offset
-      });
-      
-      offset = chunkEnd;
-    }
-    
-    return chunks;
-  }
-
-  // Fixed overlay creation with better highlighting
+  // Create overlay highlighting full sentences
   createHighlightOverlay(inputDiv, sensitiveRanges) {
     this.removeOverlaysForInput(inputDiv);
     
     if (sensitiveRanges.length === 0) return;
 
-    console.log("Creating highlight overlay with ranges:", sensitiveRanges);
+    console.log("Creating sentence highlights:", sensitiveRanges);
     
-    const text = inputDiv.textContent || inputDiv.innerText || '';
+    const text = inputDiv.textContent || inputDiv.innerText || inputDiv.value || '';
+    
     const rect = inputDiv.getBoundingClientRect();
+    const computedStyle = window.getComputedStyle(inputDiv);
     
     // Create overlay container
     const overlay = document.createElement('div');
@@ -314,75 +389,66 @@ Text: `;
       height: ${rect.height}px;
       pointer-events: none;
       z-index: 1000;
-      font-family: ${window.getComputedStyle(inputDiv).fontFamily};
-      font-size: ${window.getComputedStyle(inputDiv).fontSize};
-      line-height: ${window.getComputedStyle(inputDiv).lineHeight};
-      padding: ${window.getComputedStyle(inputDiv).padding};
-      margin: ${window.getComputedStyle(inputDiv).margin};
-      border: ${window.getComputedStyle(inputDiv).border};
-      box-sizing: border-box;
-      white-space: pre-wrap;
-      word-wrap: break-word;
+      font-family: ${computedStyle.fontFamily};
+      font-size: ${computedStyle.fontSize};
+      font-weight: ${computedStyle.fontWeight};
+      line-height: ${computedStyle.lineHeight};
+      letter-spacing: ${computedStyle.letterSpacing};
+      padding: ${computedStyle.padding};
+      margin: ${computedStyle.margin};
+      border: ${computedStyle.border};
+      box-sizing: ${computedStyle.boxSizing};
+      white-space: ${computedStyle.whiteSpace};
+      word-wrap: ${computedStyle.wordWrap};
+      word-break: ${computedStyle.wordBreak};
       overflow: hidden;
       color: transparent;
       background: transparent;
+      text-align: ${computedStyle.textAlign};
     `;
 
-    // Sort and merge overlapping ranges
+    // Sort ranges by position
     const sortedRanges = [...sensitiveRanges].sort((a, b) => a.start - b.start);
-    const mergedRanges = [];
-    
-    sortedRanges.forEach(range => {
-      if (mergedRanges.length === 0 || mergedRanges[mergedRanges.length - 1].end <= range.start) {
-        mergedRanges.push({ ...range });
-      } else {
-        mergedRanges[mergedRanges.length - 1].end = Math.max(mergedRanges[mergedRanges.length - 1].end, range.end);
-      }
-    });
-
-    console.log("Merged ranges:", mergedRanges);
 
     // Build highlighted HTML
     let highlightedHTML = '';
     let lastIndex = 0;
     
-    mergedRanges.forEach(range => {
-      // Ensure ranges are within text bounds
-      const safeStart = Math.max(0, Math.min(range.start, text.length));
-      const safeEnd = Math.max(safeStart, Math.min(range.end, text.length));
-      
+    sortedRanges.forEach(range => {
       // Add text before highlight
-      if (lastIndex < safeStart) {
-        const beforeText = text.slice(lastIndex, safeStart);
-        highlightedHTML += `<span style="background: transparent;">${this.escapeHtml(beforeText)}</span>`;
+      if (lastIndex < range.start) {
+        const beforeText = text.slice(lastIndex, range.start);
+        highlightedHTML += `<span>${this.escapeHtml(beforeText)}</span>`;
       }
       
-      // Add highlighted text
-      if (safeStart < safeEnd) {
-        const highlightText = text.slice(safeStart, safeEnd);
-        highlightedHTML += `<span style="background-color: rgba(255, 0, 0, 0.4); border-radius: 2px;">${this.escapeHtml(highlightText)}</span>`;
-        console.log(`Highlighting: "${highlightText}" at ${safeStart}-${safeEnd}`);
-      }
+      // Add highlighted sentence
+      const sentenceText = text.slice(range.start, range.end);
       
-      lastIndex = safeEnd;
+      highlightedHTML += `<span style="background-color: rgba(255, 0, 0, 0.3); border-radius: 3px; padding: 2px;" title="⚠️ Sensitive sentence detected">${this.escapeHtml(sentenceText)}</span>`;
+      
+      console.log(`Highlighting sentence: "${sentenceText}" at ${range.start}-${range.end}`);
+      lastIndex = range.end;
     });
     
     // Add remaining text
     if (lastIndex < text.length) {
       const remainingText = text.slice(lastIndex);
-      highlightedHTML += `<span style="background: transparent;">${this.escapeHtml(remainingText)}</span>`;
+      highlightedHTML += `<span>${this.escapeHtml(remainingText)}</span>`;
     }
 
     overlay.innerHTML = highlightedHTML;
     document.body.appendChild(overlay);
     
-    const overlayId = `overlay_${Date.now()}`;
+    const overlayId = `overlay_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
     this.activeOverlays.set(overlayId, overlay);
     inputDiv.dataset.overlayId = overlayId;
 
-    // Update overlay position on scroll/resize
+    // Position updates
     const updatePosition = () => {
-      if (!overlay.parentNode) return;
+      if (!overlay.parentNode || !document.body.contains(inputDiv)) {
+        this.removeOverlaysForInput(inputDiv);
+        return;
+      }
       const newRect = inputDiv.getBoundingClientRect();
       overlay.style.top = `${newRect.top + window.scrollY}px`;
       overlay.style.left = `${newRect.left + window.scrollX}px`;
@@ -390,17 +456,25 @@ Text: `;
       overlay.style.height = `${newRect.height}px`;
     };
 
-    window.addEventListener('scroll', updatePosition);
-    window.addEventListener('resize', updatePosition);
+    let updateTimer;
+    const throttledUpdate = () => {
+      if (updateTimer) return;
+      updateTimer = setTimeout(() => {
+        updatePosition();
+        updateTimer = null;
+      }, 16);
+    };
+
+    const scrollListener = throttledUpdate;
+    const resizeListener = throttledUpdate;
     
-    // Auto-cleanup with position listeners
-    setTimeout(() => {
-      if (overlay.parentNode) {
-        window.removeEventListener('scroll', updatePosition);
-        window.removeEventListener('resize', updatePosition);
-        this.removeOverlaysForInput(inputDiv);
-      }
-    }, 5000);
+    window.addEventListener('scroll', scrollListener, { passive: true });
+    window.addEventListener('resize', resizeListener, { passive: true });
+    
+    overlay.cleanup = () => {
+      window.removeEventListener('scroll', scrollListener);
+      window.removeEventListener('resize', resizeListener);
+    };
   }
 
   escapeHtml(text) {
@@ -414,6 +488,9 @@ Text: `;
     if (overlayId) {
       const overlay = this.activeOverlays.get(overlayId);
       if (overlay?.parentNode) {
+        if (overlay.cleanup) {
+          overlay.cleanup();
+        }
         overlay.remove();
       }
       this.activeOverlays.delete(overlayId);
@@ -427,7 +504,6 @@ Text: `;
       return;
     }
     
-    // Get text content - handle different input types
     const text = (inputDiv.textContent || inputDiv.innerText || inputDiv.value || '').trim();
     
     if (!text) {
@@ -437,14 +513,14 @@ Text: `;
       return;
     }
     
-    // Check cache to avoid reprocessing
+    // Check cache
     const lastText = this.lastProcessedText.get(inputDiv);
     if (lastText === text) {
       console.log("Text unchanged, skipping processing");
       return;
     }
     
-    const processingKey = `${inputDiv.dataset.detectorId || 'default'}_${text.slice(0, 50)}`;
+    const processingKey = `${inputDiv.dataset.detectorId || 'default'}_${this.hashCode(text)}`;
     if (this.processingQueue.has(processingKey)) {
       console.log("Already processing this text, skipping");
       return;
@@ -453,32 +529,15 @@ Text: `;
     this.processingQueue.set(processingKey, true);
     
     try {
-      console.log("🔍 Analyzing text:", text.substring(0, 100) + (text.length > 100 ? '...' : ''));
+      console.log("🔍 Processing text with real-time sentence analysis");
       
-      const chunks = this.chunkText(text, 800);
-      const allSensitiveRanges = [];
+      // Pass inputDiv to enable real-time highlighting
+      const sensitiveRanges = await this.analyzeBulkText(text, inputDiv);
       
-      for (const chunk of chunks) {
-        const chunkRanges = await this.analyzeBulkText(chunk.text);
-        
-        chunkRanges.forEach(range => {
-          allSensitiveRanges.push({
-            start: range.start + chunk.offset,
-            end: range.end + chunk.offset,
-            type: range.type
-          });
-        });
-        
-        if (chunks.length > 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-      
-      if (allSensitiveRanges.length > 0) {
-        console.log(`🚨 Found ${allSensitiveRanges.length} sensitive items:`, allSensitiveRanges);
-        inputDiv.style.border = "2px solid red";
-        inputDiv.title = `⚠️ ${allSensitiveRanges.length} sensitive items detected`;
-        this.createHighlightOverlay(inputDiv, allSensitiveRanges);
+      // Final update (this might be redundant since real-time highlighting already happened)
+      if (sensitiveRanges.length > 0) {
+        console.log(`🚨 Final: ${sensitiveRanges.length} sensitive sentences total`);
+        // The highlighting and border should already be set by real-time updates
       } else {
         console.log("✅ No sensitive content found");
         inputDiv.style.border = "";
@@ -486,7 +545,6 @@ Text: `;
         this.removeOverlaysForInput(inputDiv);
       }
       
-      // Cache the result
       this.lastProcessedText.set(inputDiv, text);
       
     } catch (error) {
@@ -494,6 +552,16 @@ Text: `;
     } finally {
       this.processingQueue.delete(processingKey);
     }
+  }
+
+  hashCode(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    return hash.toString(36);
   }
 
   attachToInput(inputDiv) {
@@ -510,7 +578,7 @@ Text: `;
     }
     
     let debounceTimer;
-    const debounceDelay = 1500; // Shorter delay for better responsiveness
+    const debounceDelay = 1500; // Faster response for sentence classification
     
     const processHandler = () => {
       clearTimeout(debounceTimer);
@@ -519,35 +587,34 @@ Text: `;
       }, debounceDelay);
     };
 
-    // Enhanced event listeners to catch all changes
-    const events = ['input', 'paste', 'keyup', 'keydown', 'change'];
+    const events = ['input', 'paste', 'keyup', 'change'];
     events.forEach(eventType => {
       inputDiv.addEventListener(eventType, processHandler);
     });
     
-    // Special handling for paste events
     inputDiv.addEventListener("paste", () => {
-      // Clear cache on paste to force reprocessing
       this.lastProcessedText.delete(inputDiv);
-      setTimeout(processHandler, 100); // Delay to let paste complete
+      this.removeOverlaysForInput(inputDiv);
+      setTimeout(() => {
+        clearTimeout(debounceTimer);
+        this.processInput(inputDiv);
+      }, 300);
     });
     
-    // Handle backspace/delete specially
     inputDiv.addEventListener("keydown", (e) => {
-      if (e.key === 'Backspace' || e.key === 'Delete') {
-        // Clear cache to force reprocessing on deletion
+      if (e.key === 'Backspace' || e.key === 'Delete' || 
+          e.key === 'Enter' || e.ctrlKey || e.metaKey) {
         this.lastProcessedText.delete(inputDiv);
+        this.removeOverlaysForInput(inputDiv);
         processHandler();
       }
     });
     
-    // Immediate blur processing
     inputDiv.addEventListener("blur", () => {
       clearTimeout(debounceTimer);
       this.processInput(inputDiv);
     });
     
-    // Clear overlays when input is emptied
     inputDiv.addEventListener("input", () => {
       const text = (inputDiv.textContent || inputDiv.innerText || inputDiv.value || '').trim();
       if (!text) {
@@ -555,16 +622,19 @@ Text: `;
         this.removeOverlaysForInput(inputDiv);
         inputDiv.style.border = "";
         inputDiv.title = "";
+      } else {
+        const lastText = this.lastProcessedText.get(inputDiv);
+        if (lastText && lastText !== text) {
+          this.removeOverlaysForInput(inputDiv);
+        }
       }
     });
 
-    // Process existing text immediately if engine is ready
     if (this.isInitialized) {
-      console.log("Engine ready, processing existing text immediately");
-      setTimeout(() => this.processInput(inputDiv), 100);
+      console.log("Engine ready, processing existing text");
+      setTimeout(() => this.processInput(inputDiv), 200);
     }
 
-    // Cleanup observer
     const observer = new MutationObserver((mutations) => {
       mutations.forEach((mutation) => {
         mutation.removedNodes.forEach((node) => {
@@ -580,10 +650,11 @@ Text: `;
     });
     
     observer.observe(document.body, { childList: true, subtree: true });
+    inputDiv.detectorObserver = observer;
   }
 
   startMonitoring() {
-    console.log("🔍 Starting to monitor for input elements");
+    console.log("🔍 Starting sentence-by-sentence monitoring");
     
     const observer = new MutationObserver(() => {
       const inputDiv = document.querySelector("#ask-input");
@@ -595,7 +666,6 @@ Text: `;
 
     observer.observe(document.body, { childList: true, subtree: true });
     
-    // Check immediately for existing input
     const inputDiv = document.querySelector("#ask-input");
     if (inputDiv) {
       console.log("✅ Found existing #ask-input element");
@@ -608,11 +678,11 @@ Text: `;
 
 /* ---------------- Bootstrap ---------------- */
 (async () => {
-  console.log("🚀 Loading bug-fixed detector...");
+  console.log("🚀 Loading sentence-by-sentence detector...");
   
   const detector = new SensitiveTextDetector();
   await detector.initialize();
   detector.startMonitoring();
   
-  console.log("✅ Bug-fixed detector ready and monitoring");
+  console.log("✅ Sentence detector ready and monitoring");
 })();
