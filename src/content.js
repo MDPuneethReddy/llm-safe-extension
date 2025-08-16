@@ -14,6 +14,8 @@ class SensitiveTextDetector {
     this.pendingMessages = new Map();
     this.statusIcon = null;
     this.isProcessing = false;
+    this.isDragging = false;
+    this.dragStartTime = 0;
     
     // Use BroadcastChannel for cross-tab communication
     this.channel = new BroadcastChannel('webllm_shared_engine');
@@ -42,17 +44,56 @@ Examples:
 Sentence: `;
   }
 
-  // Create and manage the status icon
+  // Get saved position from localStorage, with fallback defaults
+  getSavedPosition() {
+    try {
+      const saved = localStorage.getItem('sensitive-detector-position');
+      if (saved) {
+        const position = JSON.parse(saved);
+        // Validate position is within viewport bounds
+        const maxRight = Math.max(20, window.innerWidth - 70);
+        const maxBottom = Math.max(20, window.innerHeight - 70);
+        return {
+          right: Math.min(Math.max(20, position.right), maxRight),
+          bottom: Math.min(Math.max(20, position.bottom), maxBottom)
+        };
+      }
+    } catch (error) {
+      console.warn("Could not load saved position:", error);
+    }
+    
+    // Default position
+    return {
+      right: 20,
+      bottom: 20
+    };
+  }
+
+  // Save position to localStorage
+  savePosition(right, bottom) {
+    try {
+      localStorage.setItem('sensitive-detector-position', JSON.stringify({
+        right: right,
+        bottom: bottom
+      }));
+    } catch (error) {
+      console.warn("Could not save position:", error);
+    }
+  }
+
+  // Create and manage the draggable status icon
   createStatusIcon() {
     if (this.statusIcon) return;
-
+    
+    const savedPosition = this.getSavedPosition();
+    
     // Create icon container
     this.statusIcon = document.createElement('div');
     this.statusIcon.id = 'sensitive-text-detector-icon';
     this.statusIcon.style.cssText = `
       position: fixed;
-      bottom: 20px;
-      right: 20px;
+      bottom: ${savedPosition.bottom}px;
+      right: ${savedPosition.right}px;
       width: 50px;
       height: 50px;
       border-radius: 50%;
@@ -64,21 +105,23 @@ Sentence: `;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       font-size: 24px;
       font-weight: bold;
-      cursor: pointer;
+      cursor: move;
       z-index: 10000;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
       transition: all 0.3s ease;
       user-select: none;
+      touch-action: none;
     `;
 
-    // Create the "G" text
-    const gText = document.createElement('span');
-    gText.textContent = 's';
-    gText.style.cssText = `
+    // Create the "s" text
+    const sText = document.createElement('span');
+    sText.textContent = 's';
+    sText.style.cssText = `
       position: relative;
       z-index: 2;
+      pointer-events: none;
     `;
-    this.statusIcon.appendChild(gText);
+    this.statusIcon.appendChild(sText);
 
     // Create spinner overlay (initially hidden)
     const spinner = document.createElement('div');
@@ -97,6 +140,7 @@ Sentence: `;
       opacity: 0;
       transition: opacity 0.3s ease;
       z-index: 3;
+      pointer-events: none;
     `;
     this.statusIcon.appendChild(spinner);
 
@@ -110,18 +154,36 @@ Sentence: `;
           100% { transform: rotate(360deg); }
         }
         
-        #sensitive-text-detector-icon:hover {
+        #sensitive-text-detector-icon:hover:not(.dragging) {
           transform: scale(1.05);
           box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+        }
+        
+        #sensitive-text-detector-icon.dragging {
+          transform: scale(1.1);
+          box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+          z-index: 10001;
+          transition: none;
+        }
+        
+        .drag-instructions {
+          position: absolute;
+          bottom: -35px;
+          left: 50%;
+          transform: translateX(-50%);
+          background: rgba(0, 0, 0, 0.8);
+          color: white;
+          padding: 4px 8px;
+          border-radius: 4px;
+          font-size: 12px;
+          white-space: nowrap;
+          pointer-events: none;
         }
       `;
       document.head.appendChild(style);
     }
 
-    // Add click handler for status info
-    this.statusIcon.addEventListener('click', () => {
-      this.showStatusTooltip();
-    });
+    this.makeDraggable();
 
     // Add to page
     document.body.appendChild(this.statusIcon);
@@ -130,46 +192,165 @@ Sentence: `;
     this.updateIconStatus('not-ready');
   }
 
+  makeDraggable() {
+    let startX, startY, startRight, startBottom;
+    let hasMoved = false;
+
+    // Mouse events
+    this.statusIcon.addEventListener('mousedown', (e) => {
+      this.startDrag(e, e.clientX, e.clientY);
+    });
+
+    // Touch events for mobile
+    this.statusIcon.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const touch = e.touches[0];
+      this.startDrag(e, touch.clientX, touch.clientY);
+    });
+
+    const startDrag = (e, clientX, clientY) => {
+      this.isDragging = true;
+      this.dragStartTime = Date.now();
+      hasMoved = false;
+      
+      const rect = this.statusIcon.getBoundingClientRect();
+      const computedStyle = window.getComputedStyle(this.statusIcon);
+      
+      startX = clientX;
+      startY = clientY;
+      startRight = parseInt(computedStyle.right);
+      startBottom = parseInt(computedStyle.bottom);
+
+      this.statusIcon.classList.add('dragging');
+      
+      // Show drag instructions
+      this.showDragInstructions();
+
+      // Prevent default to avoid text selection
+      e.preventDefault();
+    };
+
+    const handleMove = (e, clientX, clientY) => {
+      if (!this.isDragging) return;
+      
+      const deltaX = startX - clientX;
+      const deltaY = clientY - startY;
+      
+      // Check if user has moved enough to be considered dragging (prevents accidental drags)
+      if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+        hasMoved = true;
+      }
+
+      const newRight = Math.max(10, Math.min(window.innerWidth - 60, startRight + deltaX));
+      const newBottom = Math.max(10, Math.min(window.innerHeight - 60, startBottom + deltaY));
+
+      this.statusIcon.style.right = `${newRight}px`;
+      this.statusIcon.style.bottom = `${newBottom}px`;
+    };
+
+    const endDrag = () => {
+      if (!this.isDragging) return;
+      
+      this.isDragging = false;
+      this.statusIcon.classList.remove('dragging');
+      
+      // Hide drag instructions
+      this.hideDragInstructions();
+
+      // Save new position
+      const computedStyle = window.getComputedStyle(this.statusIcon);
+      const finalRight = parseInt(computedStyle.right);
+      const finalBottom = parseInt(computedStyle.bottom);
+      
+      this.savePosition(finalRight, finalBottom);
+
+      // If the user didn't actually drag (just clicked), show status after a short delay
+      const dragDuration = Date.now() - this.dragStartTime;
+      if (!hasMoved && dragDuration < 200) {
+        setTimeout(() => {
+          this.showStatusTooltip();
+        }, 50);
+      }
+    };
+
+    // Mouse move and up events
+    document.addEventListener('mousemove', (e) => {
+      handleMove(e, e.clientX, e.clientY);
+    });
+
+    document.addEventListener('mouseup', endDrag);
+
+    // Touch move and end events
+    document.addEventListener('touchmove', (e) => {
+      if (this.isDragging) {
+        e.preventDefault();
+        const touch = e.touches[0];
+        handleMove(e, touch.clientX, touch.clientY);
+      }
+    }, { passive: false });
+
+    document.addEventListener('touchend', endDrag);
+
+    this.startDrag = startDrag;
+  }
+
+  showDragInstructions() {
+    // Remove any existing instructions
+    this.hideDragInstructions();
+    
+    const instructions = document.createElement('div');
+    instructions.className = 'drag-instructions';
+    instructions.textContent = 'Drag to move';
+    this.statusIcon.appendChild(instructions);
+  }
+
+  hideDragInstructions() {
+    const existing = this.statusIcon.querySelector('.drag-instructions');
+    if (existing) {
+      existing.remove();
+    }
+  }
+
   updateIconStatus(status) {
     if (!this.statusIcon) return;
 
     const spinner = this.statusIcon.querySelector('.spinner');
-    const gText = this.statusIcon.querySelector('span');
+    const sText = this.statusIcon.querySelector('span');
 
     switch (status) {
       case 'not-ready':
         this.statusIcon.style.backgroundColor = '#dc2626'; // Red
-        this.statusIcon.title = '🔴 AI Engine Not Ready - Loading...';
+        this.statusIcon.title = '🔴 AI Engine Not Ready - Loading...\n(Click for info, drag to move)';
         spinner.style.opacity = '0';
-        gText.style.opacity = '1';
+        sText.style.opacity = '1';
         break;
         
       case 'loading':
         this.statusIcon.style.backgroundColor = '#f59e0b'; // Orange
-        this.statusIcon.title = '🟡 AI Engine Loading...';
+        this.statusIcon.title = '🟡 AI Engine Loading...\n(Click for info, drag to move)';
         spinner.style.opacity = '0';
-        gText.style.opacity = '1';
+        sText.style.opacity = '1';
         break;
         
       case 'ready':
         this.statusIcon.style.backgroundColor = '#059669'; // Green
-        this.statusIcon.title = '🟢 AI Engine Ready - Monitoring Text';
+        this.statusIcon.title = '🟢 AI Engine Ready - Monitoring Text\n(Click for info, drag to move)';
         spinner.style.opacity = '0';
-        gText.style.opacity = '1';
+        sText.style.opacity = '1';
         break;
         
       case 'processing':
         // Keep current background color but show spinner
-        this.statusIcon.title = '⚡ Processing Text...';
+        this.statusIcon.title = '⚡ Processing Text...\n(Click for info, drag to move)';
         spinner.style.opacity = '1';
-        gText.style.opacity = '0.3';
+        sText.style.opacity = '0.3';
         break;
         
       case 'error':
         this.statusIcon.style.backgroundColor = '#7c2d12'; // Dark red
-        this.statusIcon.title = '❌ AI Engine Error';
+        this.statusIcon.title = '❌ AI Engine Error\n(Click for info, drag to move)';
         spinner.style.opacity = '0';
-        gText.style.opacity = '1';
+        sText.style.opacity = '1';
         break;
     }
   }
@@ -189,43 +370,71 @@ Sentence: `;
   }
 
   showStatusTooltip() {
+    // Don't show tooltip if currently dragging
+    if (this.isDragging) return;
+    
     // Create temporary tooltip
     const tooltip = document.createElement('div');
     tooltip.style.cssText = `
       position: fixed;
-      bottom: 80px;
-      right: 20px;
       background: rgba(0, 0, 0, 0.9);
       color: white;
       padding: 12px 16px;
       border-radius: 8px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       font-size: 14px;
-      z-index: 10001;
+      z-index: 10002;
       max-width: 300px;
       line-height: 1.4;
+      pointer-events: none;
     `;
 
     let statusText = '';
     if (!this.isInitialized && !this.isMainTab) {
-      statusText = '🔴 Engine Not Ready\nWaiting for AI model to load...';
+      statusText = '🔴 Engine Not Ready\nWaiting for AI model to load...\n\n💡 Tip: Drag the button to move it around!';
     } else if (!this.isInitialized && this.isMainTab) {
-      statusText = '🟡 Loading AI Model\nThis may take a few moments...';
+      statusText = '🟡 Loading AI Model\nThis may take a few moments...\n\n💡 Tip: Drag the button to move it around!';
     } else if (this.isProcessing) {
-      statusText = '⚡ Processing Text\nAnalyzing for sensitive content...';
+      statusText = '⚡ Processing Text\nAnalyzing for sensitive content...\n\n💡 Tip: Drag the button to move it around!';
     } else {
-      statusText = '🟢 Ready & Monitoring\nAI engine is active and watching for sensitive text';
+      statusText = '🟢 Ready & Monitoring\nAI engine is active and watching for sensitive text\n\n💡 Tip: Drag the button to move it around!';
     }
 
     tooltip.textContent = statusText;
+
+    // Position tooltip relative to the status icon
+    const iconRect = this.statusIcon.getBoundingClientRect();
+    const tooltipWidth = 320; // approximate width
+    const tooltipHeight = 120; // approximate height
+    
+    // Try to position above and to the left of the icon
+    let tooltipLeft = iconRect.left - tooltipWidth + iconRect.width;
+    let tooltipTop = iconRect.top - tooltipHeight - 10;
+    
+    // Adjust if tooltip would go off screen
+    if (tooltipLeft < 10) {
+      tooltipLeft = iconRect.right + 10;
+    }
+    if (tooltipTop < 10) {
+      tooltipTop = iconRect.bottom + 10;
+    }
+    
+    // Make sure tooltip doesn't go off the right edge
+    if (tooltipLeft + tooltipWidth > window.innerWidth - 10) {
+      tooltipLeft = window.innerWidth - tooltipWidth - 10;
+    }
+    
+    tooltip.style.left = `${tooltipLeft}px`;
+    tooltip.style.top = `${tooltipTop}px`;
+    
     document.body.appendChild(tooltip);
 
-    // Auto-remove after 3 seconds
+    // Auto-remove after 4 seconds
     setTimeout(() => {
       if (tooltip.parentNode) {
         tooltip.remove();
       }
-    }, 3000);
+    }, 4000);
   }
 
   async initialize() {
@@ -262,7 +471,7 @@ Sentence: `;
             console.log(`Loading model: ${percentage}%`);
             this.updateIconStatus('loading');
             if (this.statusIcon) {
-              this.statusIcon.title = `🟡 Loading AI Model: ${percentage}%`;
+              this.statusIcon.title = `🟡 Loading AI Model: ${percentage}%\n(Click for info, drag to move)`;
             }
             this.channel.postMessage({
               type: 'loading_progress',
@@ -339,7 +548,7 @@ Sentence: `;
         const percentage = Math.round(message.progress * 100);
         console.log(`Model loading: ${percentage}%`);
         if (this.statusIcon && !this.isMainTab) {
-          this.statusIcon.title = `🟡 Loading AI Model: ${percentage}%`;
+          this.statusIcon.title = `🟡 Loading AI Model: ${percentage}%\n(Click for info, drag to move)`;
         }
         break;
     }
@@ -889,11 +1098,11 @@ Sentence: `;
 
 /* ---------------- Bootstrap ---------------- */
 (async () => {
-  console.log("🚀 Loading sentence-by-sentence detector...");
+  console.log("🚀 Loading sentence-by-sentence detector with draggable status button...");
   
   const detector = new SensitiveTextDetector();
   await detector.initialize();
   detector.startMonitoring();
   
-  console.log("✅ Sentence detector ready and monitoring");
+  console.log("✅ Sentence detector ready and monitoring - drag the status button to move it around!");
 })();
