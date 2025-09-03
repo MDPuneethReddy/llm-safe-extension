@@ -1,6 +1,10 @@
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
+import {classificationPrompt} from "./config.js";
+import { splitIntoSentences, chunkSentence } from "./sentencematch.js";
+import { getSavedPosition, savePosition,getStatusConfig,getTooltipText } from "./statusicon.js";
+import { spinnerstyles,statusTooltipstyles,spinnerAnimationStyles,escapeHtml } from "./styles.js";
+import {hashCode} from "./utils.js";
 
-/* ---------------- Sentence-by-Sentence Parallel Detector ---------------- */
 class SensitiveTextDetector {
   constructor() {
     this.isInitialized = false;
@@ -24,73 +28,19 @@ class SensitiveTextDetector {
     });
     
     // Simple binary classification prompt
-    this.classificationPrompt = `Analyze this sentence for sensitive information. Respond with ONLY "true" or "false".
-
-Sensitive information includes:
-- Personal names, addresses, phone numbers, email addresses
-- Passwords, API keys, tokens, credentials
-- Credit card numbers, bank account numbers, SSN
-- Personal confessions, secrets, private thoughts
-- Financial details, salary information
-
-Examples:
-"My name is John Smith" → true
-"My password is abc123" → true  
-"I confess I cheated on the test" → true
-"The weather is nice today" → false
-"Let's meet at the coffee shop" → false
-"I love pizza" → false
-
-Sentence: `;
-  }
-
-  // Get saved position from localStorage, with fallback defaults
-  getSavedPosition() {
-    try {
-      const saved = localStorage.getItem('sensitive-detector-position');
-      if (saved) {
-        const position = JSON.parse(saved);
-        // Validate position is within viewport bounds
-        const maxRight = Math.max(20, window.innerWidth - 70);
-        const maxBottom = Math.max(20, window.innerHeight - 70);
-        return {
-          right: Math.min(Math.max(20, position.right), maxRight),
-          bottom: Math.min(Math.max(20, position.bottom), maxBottom)
-        };
-      }
-    } catch (error) {
-      console.warn("Could not load saved position:", error);
-    }
-    
-    // Default position
-    return {
-      right: 20,
-      bottom: 20
-    };
-  }
-
-  // Save position to localStorage
-  savePosition(right, bottom) {
-    try {
-      localStorage.setItem('sensitive-detector-position', JSON.stringify({
-        right: right,
-        bottom: bottom
-      }));
-    } catch (error) {
-      console.warn("Could not save position:", error);
-    }
+    this.classificationPrompt = classificationPrompt
   }
 
   // Create and manage the draggable status icon
   createStatusIcon() {
     if (this.statusIcon) return;
     
-    const savedPosition = this.getSavedPosition();
+    const savedPosition = getSavedPosition();
     
     // Create icon container
     this.statusIcon = document.createElement('div');
     this.statusIcon.id = 'sensitive-text-detector-icon';
-    this.statusIcon.style.cssText = `
+    this.statusIcon.style.cssText =  `
       position: fixed;
       bottom: ${savedPosition.bottom}px;
       right: ${savedPosition.right}px;
@@ -111,7 +61,7 @@ Sentence: `;
       transition: all 0.3s ease;
       user-select: none;
       touch-action: none;
-    `;
+    `
 
     // Create the "s" text
     const sText = document.createElement('span');
@@ -126,60 +76,14 @@ Sentence: `;
     // Create spinner overlay (initially hidden)
     const spinner = document.createElement('div');
     spinner.className = 'spinner';
-    spinner.style.cssText = `
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 30px;
-      height: 30px;
-      margin: -15px 0 0 -15px;
-      border: 3px solid rgba(255, 255, 255, 0.3);
-      border-top: 3px solid white;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      opacity: 0;
-      transition: opacity 0.3s ease;
-      z-index: 3;
-      pointer-events: none;
-    `;
+    spinner.style.cssText = spinnerstyles
     this.statusIcon.appendChild(spinner);
 
     // Add CSS keyframes for spinner animation
     if (!document.querySelector('#detector-spinner-styles')) {
       const style = document.createElement('style');
       style.id = 'detector-spinner-styles';
-      style.textContent = `
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-        
-        #sensitive-text-detector-icon:hover:not(.dragging) {
-          transform: scale(1.05);
-          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
-        }
-        
-        #sensitive-text-detector-icon.dragging {
-          transform: scale(1.1);
-          box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
-          z-index: 10001;
-          transition: none;
-        }
-        
-        .drag-instructions {
-          position: absolute;
-          bottom: -35px;
-          left: 50%;
-          transform: translateX(-50%);
-          background: rgba(0, 0, 0, 0.8);
-          color: white;
-          padding: 4px 8px;
-          border-radius: 4px;
-          font-size: 12px;
-          white-space: nowrap;
-          pointer-events: none;
-        }
-      `;
+      style.textContent = spinnerAnimationStyles;
       document.head.appendChild(style);
     }
 
@@ -262,7 +166,7 @@ Sentence: `;
       const finalRight = parseInt(computedStyle.right);
       const finalBottom = parseInt(computedStyle.bottom);
       
-      this.savePosition(finalRight, finalBottom);
+      savePosition(finalRight, finalBottom);
 
       // If the user didn't actually drag (just clicked), show status after a short delay
       const dragDuration = Date.now() - this.dragStartTime;
@@ -316,43 +220,14 @@ Sentence: `;
 
     const spinner = this.statusIcon.querySelector('.spinner');
     const sText = this.statusIcon.querySelector('span');
-
-    switch (status) {
-      case 'not-ready':
-        this.statusIcon.style.backgroundColor = '#dc2626'; // Red
-        this.statusIcon.title = '🔴 AI Engine Not Ready - Loading...\n(Click for info, drag to move)';
-        spinner.style.opacity = '0';
-        sText.style.opacity = '1';
-        break;
-        
-      case 'loading':
-        this.statusIcon.style.backgroundColor = '#f59e0b'; // Orange
-        this.statusIcon.title = '🟡 AI Engine Loading...\n(Click for info, drag to move)';
-        spinner.style.opacity = '0';
-        sText.style.opacity = '1';
-        break;
-        
-      case 'ready':
-        this.statusIcon.style.backgroundColor = '#059669'; // Green
-        this.statusIcon.title = '🟢 AI Engine Ready - Monitoring Text\n(Click for info, drag to move)';
-        spinner.style.opacity = '0';
-        sText.style.opacity = '1';
-        break;
-        
-      case 'processing':
-        // Keep current background color but show spinner
-        this.statusIcon.title = '⚡ Processing Text...\n(Click for info, drag to move)';
-        spinner.style.opacity = '1';
-        sText.style.opacity = '0.3';
-        break;
-        
-      case 'error':
-        this.statusIcon.style.backgroundColor = '#7c2d12'; // Dark red
-        this.statusIcon.title = '❌ AI Engine Error\n(Click for info, drag to move)';
-        spinner.style.opacity = '0';
-        sText.style.opacity = '1';
-        break;
-    }
+    const config = getStatusConfig(status);
+    if (!config) return;
+    if (config.backgroundColor) {
+    this.statusIcon.style.backgroundColor = config.backgroundColor;
+  }
+    this.statusIcon.title = config.title;
+  spinner.style.opacity = config.spinnerOpacity;
+  sText.style.opacity = config.textOpacity;
   }
 
   setProcessingState(isProcessing) {
@@ -369,73 +244,45 @@ Sentence: `;
     }
   }
 
-  showStatusTooltip() {
-    // Don't show tooltip if currently dragging
-    if (this.isDragging) return;
-    
-    // Create temporary tooltip
-    const tooltip = document.createElement('div');
-    tooltip.style.cssText = `
-      position: fixed;
-      background: rgba(0, 0, 0, 0.9);
-      color: white;
-      padding: 12px 16px;
-      border-radius: 8px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 14px;
-      z-index: 10002;
-      max-width: 300px;
-      line-height: 1.4;
-      pointer-events: none;
-    `;
 
-    let statusText = '';
-    if (!this.isInitialized && !this.isMainTab) {
-      statusText = '🔴 Engine Not Ready\nWaiting for AI model to load...\n\n💡 Tip: Drag the button to move it around!';
-    } else if (!this.isInitialized && this.isMainTab) {
-      statusText = '🟡 Loading AI Model\nThis may take a few moments...\n\n💡 Tip: Drag the button to move it around!';
-    } else if (this.isProcessing) {
-      statusText = '⚡ Processing Text\nAnalyzing for sensitive content...\n\n💡 Tip: Drag the button to move it around!';
-    } else {
-      statusText = '🟢 Ready & Monitoring\nAI engine is active and watching for sensitive text\n\n💡 Tip: Drag the button to move it around!';
-    }
+showStatusTooltip() {
+  if (this.isDragging) return;
 
-    tooltip.textContent = statusText;
+  const tooltip = document.createElement('div');
+  tooltip.style.cssText = statusTooltipstyles;
 
-    // Position tooltip relative to the status icon
-    const iconRect = this.statusIcon.getBoundingClientRect();
-    const tooltipWidth = 320; // approximate width
-    const tooltipHeight = 120; // approximate height
-    
-    // Try to position above and to the left of the icon
-    let tooltipLeft = iconRect.left - tooltipWidth + iconRect.width;
-    let tooltipTop = iconRect.top - tooltipHeight - 10;
-    
-    // Adjust if tooltip would go off screen
-    if (tooltipLeft < 10) {
-      tooltipLeft = iconRect.right + 10;
-    }
-    if (tooltipTop < 10) {
-      tooltipTop = iconRect.bottom + 10;
-    }
-    
-    // Make sure tooltip doesn't go off the right edge
-    if (tooltipLeft + tooltipWidth > window.innerWidth - 10) {
-      tooltipLeft = window.innerWidth - tooltipWidth - 10;
-    }
-    
-    tooltip.style.left = `${tooltipLeft}px`;
-    tooltip.style.top = `${tooltipTop}px`;
-    
-    document.body.appendChild(tooltip);
+  // 🔹 Get tooltip message from config module
+  const statusText = getTooltipText({
+    isInitialized: this.isInitialized,
+    isMainTab: this.isMainTab,
+    isProcessing: this.isProcessing
+  });
 
-    // Auto-remove after 4 seconds
-    setTimeout(() => {
-      if (tooltip.parentNode) {
-        tooltip.remove();
-      }
-    }, 4000);
+  tooltip.textContent = statusText;
+
+  // Position tooltip relative to the status icon
+  const iconRect = this.statusIcon.getBoundingClientRect();
+  const tooltipWidth = 320;
+  const tooltipHeight = 120;
+
+  let tooltipLeft = iconRect.left - tooltipWidth + iconRect.width;
+  let tooltipTop = iconRect.top - tooltipHeight - 10;
+
+  if (tooltipLeft < 10) tooltipLeft = iconRect.right + 10;
+  if (tooltipTop < 10) tooltipTop = iconRect.bottom + 10;
+  if (tooltipLeft + tooltipWidth > window.innerWidth - 10) {
+    tooltipLeft = window.innerWidth - tooltipWidth - 10;
   }
+
+  tooltip.style.left = `${tooltipLeft}px`;
+  tooltip.style.top = `${tooltipTop}px`;
+
+  document.body.appendChild(tooltip);
+
+  setTimeout(() => {
+    if (tooltip.parentNode) tooltip.remove();
+  }, 4000);
+}
 
   async initialize() {
     // Create icon immediately
@@ -615,46 +462,8 @@ Sentence: `;
   }
 
   // Split text into sentences with positions
-  splitIntoSentences(text) {
-    const sentences = [];
-    
-    // More comprehensive sentence splitting
-    const sentenceRegex = /[.!?]+(?:\s+|$)/g;
-    let lastEnd = 0;
-    let match;
-    
-    while ((match = sentenceRegex.exec(text)) !== null) {
-      const sentenceEnd = match.index + match[0].length;
-      const sentence = text.slice(lastEnd, sentenceEnd).trim();
-      
-      if (sentence.length > 0) {
-        sentences.push({
-          text: sentence,
-          start: lastEnd,
-          end: sentenceEnd
-        });
-      }
-      
-      lastEnd = sentenceEnd;
-    }
-    
-    // Handle remaining text if no final punctuation
-    if (lastEnd < text.length) {
-      const remaining = text.slice(lastEnd).trim();
-      if (remaining.length > 0) {
-        sentences.push({
-          text: remaining,
-          start: lastEnd,
-          end: text.length
-        });
-      }
-    }
-    
-    return sentences;
-  }
 
-  // Classify a single sentence
-  async classifySentence(sentence) {
+async classifySentence(sentence) {
     try {
       const response = await this.sendChatRequest({
         messages: [
@@ -677,71 +486,63 @@ Sentence: `;
     }
   }
 
-  // Process sentences with real-time highlighting
-  async processSentencesWithRealTimeHighlighting(sentences, inputDiv, batchSize = 3) {
-    const allResults = [];
-    let currentSensitiveRanges = [];
-    
-    for (let i = 0; i < sentences.length; i += batchSize) {
-      const batch = sentences.slice(i, i + batchSize);
-      
-      console.log(`Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(sentences.length/batchSize)}: ${batch.length} sentences`);
-      
-      // Process batch in parallel with individual callbacks
-      const batchPromises = batch.map(async (sentenceObj) => {
-        try {
-          const isSensitive = await this.classifySentence(sentenceObj.text);
-          const result = {
-            ...sentenceObj,
-            isSensitive
-          };
-          
-          // Immediately highlight if sensitive
-          if (isSensitive) {
-            console.log(`🚨 Real-time highlight: "${sentenceObj.text}"`);
-            currentSensitiveRanges.push({
-              start: sentenceObj.start,
-              end: sentenceObj.end,
-              type: 'sensitive',
-              text: sentenceObj.text
-            });
-            
-            // Update highlight overlay immediately
-            this.createHighlightOverlay(inputDiv, [...currentSensitiveRanges]);
-            
-            // Update border and tooltip
-            inputDiv.style.border = "2px solid red";
-            inputDiv.title = `⚠️ ${currentSensitiveRanges.length} sensitive sentence(s) detected`;
-          }
-          
-          return result;
-        } catch (error) {
-          console.error("Error processing sentence:", sentenceObj.text, error);
-          return {
-            ...sentenceObj,
-            isSensitive: false
-          };
+
+
+async processSentencesWithRealTimeHighlighting(sentences, inputDiv, batchSize = 3) {
+  const allResults = [];
+  let currentSensitiveRanges = [];
+
+  // Chunk long sentences first
+  const expandedSentences = sentences.flatMap(s => chunkSentence(s));
+
+  for (let i = 0; i < expandedSentences.length; i += batchSize) {
+    const batch = expandedSentences.slice(i, i + batchSize);
+
+    console.log(`Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(expandedSentences.length/batchSize)}: ${batch.length} sentences`);
+
+    const batchPromises = batch.map(async (sentenceObj) => {
+      try {
+        const isSensitive = await this.classifySentence(sentenceObj.text);
+        const result = { ...sentenceObj, isSensitive };
+
+        if (isSensitive) {
+          console.log(`🚨 Real-time highlight: "${sentenceObj.text}"`);
+          currentSensitiveRanges.push({
+            start: sentenceObj.start,
+            end: sentenceObj.end,
+            type: 'sensitive',
+            text: sentenceObj.text
+          });
+
+          this.createHighlightOverlay(inputDiv, [...currentSensitiveRanges]);
+          inputDiv.style.border = "2px solid red";
+          inputDiv.title = `⚠️ ${currentSensitiveRanges.length} sensitive sentence(s) detected`;
         }
-      });
-      
-      const batchResults = await Promise.all(batchPromises);
-      allResults.push(...batchResults);
-      
-      // Small delay between batches to prevent overwhelming
-      if (i + batchSize < sentences.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+
+        return result;
+      } catch (error) {
+        console.error("Error processing sentence:", sentenceObj.text, error);
+        return { ...sentenceObj, isSensitive: false };
       }
+    });
+
+    const batchResults = await Promise.all(batchPromises);
+    allResults.push(...batchResults);
+
+    if (i + batchSize < expandedSentences.length) {
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
-    
-    return allResults;
   }
+
+  return allResults;
+}
 
   async analyzeBulkText(text, inputDiv) {
     try {
       console.log(`🔍 Analyzing text: "${text.substring(0, 50)}..." (${text.length} chars)`);
       
       // Split into sentences
-      const sentences = this.splitIntoSentences(text);
+      const sentences = splitIntoSentences(text);
       console.log(`Split into ${sentences.length} sentences:`, sentences.map(s => s.text));
       
       if (sentences.length === 0) {
@@ -783,135 +584,183 @@ Sentence: `;
 
   // Create overlay highlighting full sentences
   createHighlightOverlay(inputDiv, sensitiveRanges) {
-    this.removeOverlaysForInput(inputDiv);
-    
-    if (sensitiveRanges.length === 0) return;
+  this.removeOverlaysForInput(inputDiv);
+  
+  if (sensitiveRanges.length === 0) return;
 
-    console.log("Creating sentence highlights:", sensitiveRanges);
-    
-    const text = inputDiv.textContent || inputDiv.innerText || inputDiv.value || '';
-    
-    const rect = inputDiv.getBoundingClientRect();
-    const computedStyle = window.getComputedStyle(inputDiv);
-    
-    // Create overlay container
-    const overlay = document.createElement('div');
-    overlay.style.cssText = `
-      position: absolute;
-      top: ${rect.top + window.scrollY}px;
-      left: ${rect.left + window.scrollX}px;
-      width: ${rect.width}px;
-      height: ${rect.height}px;
-      pointer-events: none;
-      z-index: 1000;
-      font-family: ${computedStyle.fontFamily};
-      font-size: ${computedStyle.fontSize};
-      font-weight: ${computedStyle.fontWeight};
-      line-height: ${computedStyle.lineHeight};
-      letter-spacing: ${computedStyle.letterSpacing};
-      padding: ${computedStyle.padding};
-      margin: ${computedStyle.margin};
-      border: ${computedStyle.border};
-      box-sizing: ${computedStyle.boxSizing};
-      white-space: ${computedStyle.whiteSpace};
-      word-wrap: ${computedStyle.wordWrap};
-      word-break: ${computedStyle.wordBreak};
-      overflow: hidden;
-      color: transparent;
-      background: transparent;
-      text-align: ${computedStyle.textAlign};
-    `;
+  console.log("Creating sentence highlights:", sensitiveRanges);
+  
+  const text = inputDiv.textContent || inputDiv.innerText || inputDiv.value || '';
+  
+  const rect = inputDiv.getBoundingClientRect();
+  const computedStyle = window.getComputedStyle(inputDiv);
+  
+  // Create overlay container with improved positioning
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position: absolute;
+    top: ${rect.top + window.scrollY}px;
+    left: ${rect.left + window.scrollX}px;
+    width: ${rect.width}px;
+    height: ${rect.height}px;
+    pointer-events: none;
+    z-index: 1000;
+    font-family: ${computedStyle.fontFamily};
+    font-size: ${computedStyle.fontSize};
+    font-weight: ${computedStyle.fontWeight};
+    line-height: ${computedStyle.lineHeight};
+    letter-spacing: ${computedStyle.letterSpacing};
+    padding: ${computedStyle.padding};
+    margin: ${computedStyle.margin};
+    border: transparent;
+    box-sizing: ${computedStyle.boxSizing};
+    white-space: ${computedStyle.whiteSpace};
+    word-wrap: ${computedStyle.wordWrap};
+    word-break: ${computedStyle.wordBreak};
+    overflow: ${computedStyle.overflow};
+    color: transparent;
+    background: transparent;
+    text-align: ${computedStyle.textAlign};
+    vertical-align: ${computedStyle.verticalAlign};
+    text-indent: ${computedStyle.textIndent};
+    text-transform: ${computedStyle.textTransform};
+  `;
 
-    // Sort ranges by position
-    const sortedRanges = [...sensitiveRanges].sort((a, b) => a.start - b.start);
+  // Sort ranges by position
+  const sortedRanges = [...sensitiveRanges].sort((a, b) => a.start - b.start);
 
-    // Build highlighted HTML
-    let highlightedHTML = '';
-    let lastIndex = 0;
-    
-    sortedRanges.forEach(range => {
-      // Add text before highlight
-      if (lastIndex < range.start) {
-        const beforeText = text.slice(lastIndex, range.start);
-        highlightedHTML += `<span>${this.escapeHtml(beforeText)}</span>`;
-      }
-      
-      // Add highlighted sentence
-      const sentenceText = text.slice(range.start, range.end);
-      
-      highlightedHTML += `<span style="background-color: rgba(255, 0, 0, 0.3); border-radius: 3px; padding: 2px;" title="⚠️ Sensitive sentence detected">${this.escapeHtml(sentenceText)}</span>`;
-      
-      console.log(`Highlighting sentence: "${sentenceText}" at ${range.start}-${range.end}`);
-      lastIndex = range.end;
-    });
-    
-    // Add remaining text
-    if (lastIndex < text.length) {
-      const remainingText = text.slice(lastIndex);
-      highlightedHTML += `<span>${this.escapeHtml(remainingText)}</span>`;
+  // Build highlighted HTML
+  let highlightedHTML = '';
+  let lastIndex = 0;
+  
+  sortedRanges.forEach(range => {
+    // Add text before highlight
+    if (lastIndex < range.start) {
+      const beforeText = text.slice(lastIndex, range.start);
+      highlightedHTML += `<span>${escapeHtml(beforeText)}</span>`;
     }
-
-    overlay.innerHTML = highlightedHTML;
-    document.body.appendChild(overlay);
     
-    const overlayId = `overlay_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-    this.activeOverlays.set(overlayId, overlay);
-    inputDiv.dataset.overlayId = overlayId;
+    // Add highlighted sentence
+    const sentenceText = text.slice(range.start, range.end);
+    
+    highlightedHTML += `<span style="background-color: rgba(255, 0, 0, 0.3); border-radius: 3px; padding: 2px; box-decoration-break: clone;" title="⚠️ Sensitive sentence detected">${escapeHtml(sentenceText)}</span>`;
+    
+    console.log(`Highlighting sentence: "${sentenceText}" at ${range.start}-${range.end}`);
+    lastIndex = range.end;
+  });
+  
+  // Add remaining text
+  if (lastIndex < text.length) {
+    const remainingText = text.slice(lastIndex);
+    highlightedHTML += `<span>${escapeHtml(remainingText)}</span>`;
+  }
 
-    // Position updates
-    const updatePosition = () => {
-      if (!overlay.parentNode || !document.body.contains(inputDiv)) {
-        this.removeOverlaysForInput(inputDiv);
-        return;
-      }
-      const newRect = inputDiv.getBoundingClientRect();
+  overlay.innerHTML = highlightedHTML;
+  document.body.appendChild(overlay);
+  
+  const overlayId = `overlay_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+  this.activeOverlays.set(overlayId, overlay);
+  inputDiv.dataset.overlayId = overlayId;
+
+  // Enhanced position updates with better scroll handling
+  const updatePosition = () => {
+    if (!overlay.parentNode || !document.body.contains(inputDiv)) {
+      this.removeOverlaysForInput(inputDiv);
+      return;
+    }
+    
+    const newRect = inputDiv.getBoundingClientRect();
+    
+    // Check if element is visible in viewport
+    const isVisible = newRect.top < window.innerHeight && 
+                     newRect.bottom > 0 && 
+                     newRect.left < window.innerWidth && 
+                     newRect.right > 0;
+    
+    if (isVisible) {
+      overlay.style.display = 'block';
       overlay.style.top = `${newRect.top + window.scrollY}px`;
       overlay.style.left = `${newRect.left + window.scrollX}px`;
       overlay.style.width = `${newRect.width}px`;
       overlay.style.height = `${newRect.height}px`;
-    };
+    } else {
+      // Hide overlay when input is not visible
+      overlay.style.display = 'none';
+    }
+  };
 
-    let updateTimer;
-    const throttledUpdate = () => {
-      if (updateTimer) return;
-      updateTimer = setTimeout(() => {
-        updatePosition();
-        updateTimer = null;
-      }, 16);
-    };
-
-    const scrollListener = throttledUpdate;
-    const resizeListener = throttledUpdate;
+  // Improved throttling with immediate first update
+  let isThrottled = false;
+  const throttledUpdate = () => {
+    if (isThrottled) return;
     
-    window.addEventListener('scroll', scrollListener, { passive: true });
-    window.addEventListener('resize', resizeListener, { passive: true });
-    
-    overlay.cleanup = () => {
-      window.removeEventListener('scroll', scrollListener);
-      window.removeEventListener('resize', resizeListener);
-    };
-  }
+    isThrottled = true;
+    requestAnimationFrame(() => {
+      updatePosition();
+      isThrottled = false;
+    });
+  };
 
-  escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+  // Multiple scroll listeners for better coverage
+  const scrollListener = throttledUpdate;
+  const resizeListener = throttledUpdate;
+  
+  // Listen on multiple elements that might scroll
+  window.addEventListener('scroll', scrollListener, { passive: true, capture: true });
+  document.addEventListener('scroll', scrollListener, { passive: true, capture: true });
+  window.addEventListener('resize', resizeListener, { passive: true });
+  
+  // Also listen on the input's scroll containers
+  let scrollContainer = inputDiv.parentElement;
+  const containerListeners = [];
+  
+  while (scrollContainer && scrollContainer !== document.body) {
+    const containerStyle = window.getComputedStyle(scrollContainer);
+    if (containerStyle.overflow !== 'visible') {
+      scrollContainer.addEventListener('scroll', scrollListener, { passive: true });
+      containerListeners.push({ element: scrollContainer, listener: scrollListener });
+    }
+    scrollContainer = scrollContainer.parentElement;
   }
+  
+  // Initial position update
+  updatePosition();
+  
+  overlay.cleanup = () => {
+    window.removeEventListener('scroll', scrollListener, { capture: true });
+    document.removeEventListener('scroll', scrollListener, { capture: true });
+    window.removeEventListener('resize', resizeListener);
+    
+    // Clean up container listeners
+    containerListeners.forEach(({ element, listener }) => {
+      element.removeEventListener('scroll', listener);
+    });
+  };
+}
+
+  
 
   removeOverlaysForInput(inputDiv) {
-    const overlayId = inputDiv.dataset.overlayId;
-    if (overlayId) {
-      const overlay = this.activeOverlays.get(overlayId);
-      if (overlay?.parentNode) {
-        if (overlay.cleanup) {
-          overlay.cleanup();
-        }
-        overlay.remove();
+  const overlayId = inputDiv.dataset.overlayId;
+  if (overlayId) {
+    const overlay = this.activeOverlays.get(overlayId);
+    if (overlay?.parentNode) {
+      if (overlay.cleanup) {
+        overlay.cleanup();
       }
-      this.activeOverlays.delete(overlayId);
-      delete inputDiv.dataset.overlayId;
+      overlay.remove();
     }
+    this.activeOverlays.delete(overlayId);
+    delete inputDiv.dataset.overlayId;
   }
+  
+  // Also clean up any orphaned overlays
+  this.activeOverlays.forEach((overlay, id) => {
+    if (!overlay.parentNode || !document.body.contains(overlay)) {
+      this.activeOverlays.delete(id);
+    }
+  });
+}
 
   async processInput(inputDiv) {
     if (!this.isInitialized) {
@@ -935,7 +784,7 @@ Sentence: `;
       return;
     }
     
-    const processingKey = `${inputDiv.dataset.detectorId || 'default'}_${this.hashCode(text)}`;
+    const processingKey = `${inputDiv.dataset.detectorId || 'default'}_${hashCode(text)}`;
     if (this.processingQueue.has(processingKey)) {
       console.log("Already processing this text, skipping");
       return;
@@ -974,15 +823,7 @@ Sentence: `;
     }
   }
 
-  hashCode(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return hash.toString(36);
-  }
+  
 
   attachToInput(inputDiv) {
     if (this.attachedInputs.has(inputDiv)) {
@@ -1006,6 +847,27 @@ Sentence: `;
         this.processInput(inputDiv);
       }, debounceDelay);
     };
+    const scrollHandler = () => {
+    // Update overlay positions when scrolling
+    if (inputDiv.dataset.overlayId) {
+      const overlay = this.activeOverlays.get(inputDiv.dataset.overlayId);
+      if (overlay && overlay.parentNode) {
+        const rect = inputDiv.getBoundingClientRect();
+        const isVisible = rect.top < window.innerHeight && 
+                         rect.bottom > 0 && 
+                         rect.left < window.innerWidth && 
+                         rect.right > 0;
+        
+        if (isVisible) {
+          overlay.style.display = 'block';
+          overlay.style.top = `${rect.top + window.scrollY}px`;
+          overlay.style.left = `${rect.left + window.scrollX}px`;
+        } else {
+          overlay.style.display = 'none';
+        }
+      }
+    }
+  };
 
     const events = ['input', 'paste', 'keyup', 'change'];
     events.forEach(eventType => {
@@ -1026,7 +888,10 @@ Sentence: `;
           e.key === 'Enter' || e.ctrlKey || e.metaKey) {
         this.lastProcessedText.delete(inputDiv);
         this.removeOverlaysForInput(inputDiv);
-        processHandler();
+        setTimeout(() => {
+      clearTimeout(debounceTimer);
+      this.processInput(inputDiv);
+    }, 300);
       }
     });
     
@@ -1034,6 +899,7 @@ Sentence: `;
       clearTimeout(debounceTimer);
       this.processInput(inputDiv);
     });
+    inputDiv.addEventListener('scroll', scrollHandler, { passive: true });
     
     inputDiv.addEventListener("input", () => {
       const text = (inputDiv.textContent || inputDiv.innerText || inputDiv.value || '').trim();
@@ -1056,6 +922,7 @@ Sentence: `;
     }
 
     const observer = new MutationObserver((mutations) => {
+      let shouldUpdatePosition = false;
       mutations.forEach((mutation) => {
         mutation.removedNodes.forEach((node) => {
           if (node === inputDiv || (node.nodeType === 1 && node.contains(inputDiv))) {
@@ -1066,7 +933,13 @@ Sentence: `;
             observer.disconnect();
           }
         });
+        if (mutation.type === 'childList' || mutation.type === 'characterData') {
+        shouldUpdatePosition = true;
+      }
       });
+      if (shouldUpdatePosition) {
+      setTimeout(scrollHandler, 10);
+    }
     });
     
     observer.observe(document.body, { childList: true, subtree: true });
